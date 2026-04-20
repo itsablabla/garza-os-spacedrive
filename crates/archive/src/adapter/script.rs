@@ -3,7 +3,6 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -482,8 +481,14 @@ impl Adapter for ScriptAdapter {
 				.take()
 				.ok_or_else(|| Error::AdapterSync("failed to open stderr".into()))?;
 
-			let config_json = serde_json::to_string(config)
-				.map_err(|e| Error::AdapterSync(format!("failed to serialize config: {e}")))?;
+			let cursor = db.get_cursor("default").await?;
+			let adapter_input = serde_json::json!({
+				"config": config,
+				"cursor": cursor,
+			});
+			let config_json = serde_json::to_string(&adapter_input).map_err(|e| {
+				Error::AdapterSync(format!("failed to serialize adapter input: {e}"))
+			})?;
 
 			tokio::spawn(async move {
 				let _ = stdin.write_all(config_json.as_bytes()).await;
@@ -572,5 +577,108 @@ impl Adapter for ScriptAdapter {
 
 			Ok(report)
 		})
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::fs;
+
+	use crate::adapter::Adapter;
+	use crate::source::SourceManager;
+
+	use super::ScriptAdapter;
+
+	#[test]
+	fn sync_passes_nested_config_and_cursor_to_scripts() {
+		let runtime = tokio::runtime::Builder::new_current_thread()
+			.enable_all()
+			.build()
+			.unwrap();
+		runtime.block_on(async {
+			let root = std::env::temp_dir()
+				.join(format!("sd-archive-script-test-{}", uuid::Uuid::new_v4()));
+			let adapter_dir = root.join("adapter");
+			let sources_dir = root.join("sources");
+			fs::create_dir_all(&adapter_dir).unwrap();
+
+			fs::write(
+				adapter_dir.join("adapter.toml"),
+				r#"[adapter]
+id = "test-adapter"
+name = "Test Adapter"
+
+[adapter.runtime]
+command = "python3 sync.py"
+
+[[adapter.config]]
+key = "token"
+name = "Token"
+type = "string"
+required = true
+
+[data_type]
+id = "test-record"
+name = "Test Record"
+
+[models.record]
+fields.name = "string"
+
+[search]
+primary_model = "record"
+title = "name"
+preview = "name"
+search_fields = ["name"]
+"#,
+			)
+			.unwrap();
+
+			fs::write(
+				adapter_dir.join("sync.py"),
+				r#"#!/usr/bin/env python3
+import json
+import sys
+
+payload = json.loads(sys.stdin.read())
+config = payload.get("config", {})
+cursor = payload.get("cursor")
+
+if config.get("token") == "abc":
+    print(json.dumps({
+        "upsert": "record",
+        "external_id": "record-1",
+        "fields": {"name": "ok"}
+    }), flush=True)
+
+if cursor == "cursor-1":
+    print(json.dumps({"cursor": "cursor-2"}), flush=True)
+"#,
+			)
+			.unwrap();
+
+			let adapter = ScriptAdapter::from_dir(&adapter_dir).unwrap();
+			let source_manager = SourceManager::new(sources_dir);
+			source_manager
+				.create("source-1", adapter.schema())
+				.await
+				.unwrap();
+
+			let db = source_manager.open("source-1").await.unwrap();
+			db.set_cursor("default", "cursor-1").await.unwrap();
+
+			let report = adapter
+				.sync(&db, &serde_json::json!({ "token": "abc" }))
+				.await
+				.unwrap();
+
+			assert_eq!(report.records_upserted, 1);
+			assert_eq!(db.count("record").await.unwrap(), 1);
+			assert_eq!(
+				db.get_cursor("default").await.unwrap(),
+				Some("cursor-2".to_string())
+			);
+
+			let _ = fs::remove_dir_all(&root);
+		});
 	}
 }
