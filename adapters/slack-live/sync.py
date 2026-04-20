@@ -15,6 +15,7 @@ PAGE_LIMIT = 200
 THREAD_STATE_LIMIT = 1000
 THREAD_RETENTION_DAYS = 180
 HISTORY_OVERLAP_SECONDS = 120
+EDIT_REFRESH_DAYS = 14
 
 MENTION_RE = re.compile(r"<@([A-Z0-9]+)>")
 CHANNEL_RE = re.compile(r"<#([A-Z0-9]+)(?:\|([^>]+))?>")
@@ -478,12 +479,18 @@ class SlackArchiver:
     def sync_channel_history(self, conversation, state):
         channel_id = conversation["id"]
         last_history_ts = normalize_ts_string(state.get("last_history_ts"))
+        last_refresh_before_ts = normalize_ts_string(state.get("last_refresh_before_ts"))
         oldest = None
 
         if last_history_ts:
             oldest = max(slack_ts_to_float(last_history_ts) - HISTORY_OVERLAP_SECONDS, 0.0)
         elif self.config["full_history_days"] > 0:
             oldest = (now_utc() - timedelta(days=self.config["full_history_days"])).timestamp()
+
+        refresh_cutoff = (now_utc() - timedelta(days=EDIT_REFRESH_DAYS)).timestamp()
+        refresh_latest = None
+        if last_refresh_before_ts:
+            refresh_latest = max(slack_ts_to_float(last_refresh_before_ts) - HISTORY_OVERLAP_SECONDS, 0.0)
 
         history_params = {
             "channel": channel_id,
@@ -496,6 +503,7 @@ class SlackArchiver:
 
         thread_updates = {}
         max_history_ts = last_history_ts
+        refresh_before_ts = last_refresh_before_ts
         fetched = 0
         page_params = dict(history_params)
 
@@ -530,6 +538,42 @@ class SlackArchiver:
                 break
             page_params["cursor"] = cursor
 
+        if refresh_latest is not None and refresh_cutoff > 0:
+            refresh_params = {
+                "channel": channel_id,
+                "limit": PAGE_LIMIT,
+                "inclusive": "true",
+                "oldest": "0.000000",
+                "latest": f"{refresh_cutoff:.6f}",
+                "include_all_metadata": "true",
+            }
+            if refresh_latest > 0:
+                refresh_params["oldest"] = f"{refresh_latest:.6f}"
+
+            page_params = dict(refresh_params)
+            while True:
+                payload = self.client.api_get("conversations.history", page_params)
+                messages = payload.get("messages") or []
+                messages.sort(key=lambda message: slack_ts_to_float(message.get("ts")))
+                if messages:
+                    refresh_before_ts = normalize_ts_string(messages[-1].get("ts")) or refresh_before_ts
+                for message in messages:
+                    ts_value = normalize_ts_string(message.get("ts"))
+                    if not ts_value:
+                        continue
+                    self.emit_message(conversation, message)
+                    thread_ts = normalize_ts_string(message.get("thread_ts"))
+                    latest_reply = normalize_ts_string(message.get("latest_reply"))
+                    if thread_ts and thread_ts == ts_value:
+                        thread_updates[thread_ts] = max(thread_updates.get(thread_ts, ts_value), latest_reply or ts_value, key=slack_ts_to_float)
+                    elif thread_ts:
+                        thread_updates[thread_ts] = max(thread_updates.get(thread_ts, thread_ts), ts_value, key=slack_ts_to_float)
+                cursor = ((payload.get("response_metadata") or {}).get("next_cursor") or "").strip()
+                if not cursor:
+                    break
+                page_params["cursor"] = cursor
+
+        state["last_refresh_before_ts"] = refresh_before_ts
         return max_history_ts, thread_updates
 
     def sync_threads(self, conversation, thread_state):
@@ -681,15 +725,11 @@ class SlackArchiver:
     def prune_threads(self, thread_state):
         if not thread_state:
             return {}
-        cutoff = (now_utc() - timedelta(days=THREAD_RETENTION_DAYS)).timestamp()
         rows = sorted(thread_state.items(), key=lambda item: slack_ts_to_float(item[1]), reverse=True)
         pruned = {}
         for parent_ts, latest_reply_ts in rows:
-            latest_value = slack_ts_to_float(latest_reply_ts)
             if len(pruned) >= THREAD_STATE_LIMIT:
                 break
-            if latest_value and latest_value < cutoff and len(pruned) >= min(200, THREAD_STATE_LIMIT):
-                continue
             pruned[parent_ts] = latest_reply_ts
         return pruned
 

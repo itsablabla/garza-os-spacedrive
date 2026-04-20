@@ -128,7 +128,7 @@ def apple_time_to_iso(value):
     elif raw > 10**12:
         raw = raw / 1_000_000.0
     elif raw > 10**9:
-        raw = raw / 1_000_000_000.0
+        raw = raw / 1_000.0
     dt = APPLE_EPOCH + timedelta(seconds=raw)
     return dt.astimezone(timezone.utc).isoformat()
 
@@ -184,6 +184,15 @@ def json_text(value):
         return normalize_text(str(value), TEXT_LIMIT)
 
 
+def synthetic_chat_id(row):
+    room = normalize_text(row["cache_roomnames"], 500)
+    if room:
+        return f"synthetic:{room}"
+    service = normalize_text(row["service"], 200)
+    handle_id = normalize_text(row["handle_id"], 500)
+    return f"synthetic:{service}:{handle_id or row['row_id']}"
+
+
 def build_queries(conn):
     queries = {}
     msg_cols = columns_for(conn, "message")
@@ -196,7 +205,7 @@ def build_queries(conn):
     queries["message_attributed"] = pick_column(msg_cols, "attributedBody", "attributedbody")
     queries["message_guid"] = pick_column(msg_cols, "guid", "message_guid")
     queries["message_service"] = pick_column(msg_cols, "service", "service_name")
-    queries["message_edited"] = pick_column(msg_cols, "date_edited", "date_read")
+    queries["message_edited"] = pick_column(msg_cols, "date_edited")
     queries["message_assoc"] = pick_column(msg_cols, "associated_message_guid", "thread_originator_guid")
     queries["message_cache_room"] = pick_column(msg_cols, "cache_roomnames")
     queries["message_type"] = pick_column(msg_cols, "item_type", "message_action_type")
@@ -407,7 +416,7 @@ def main():
                 continue
             if dt and date_to and dt > date_to:
                 continue
-            if dt and last_synced and dt < last_synced and max_messages <= 0:
+            if dt and last_synced and dt < last_synced:
                 continue
             filtered.append((dt or APPLE_EPOCH, row, ts))
         filtered.sort(key=lambda item: item[0])
@@ -422,7 +431,7 @@ def main():
         for _dt, row, ts in filtered:
             chat = chats.get(row["chat_id"])
             if not chat:
-                fallback_guid = normalize_text(row["cache_roomnames"], 500)
+                fallback_guid = synthetic_chat_id(row)
                 if fallback_guid:
                     chat = {
                         "external_id": fallback_guid,
@@ -434,7 +443,7 @@ def main():
                         "participant_count": 0,
                         "metadata": {"synthetic": True},
                     }
-                    chats[row["chat_id"]] = chat
+                    chats[row["chat_id"] if row["chat_id"] is not None else fallback_guid] = chat
             if not chat:
                 continue
 

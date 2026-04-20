@@ -179,9 +179,9 @@ def account_matches(account, account_filter, network_filter):
 
 
 def chat_matches(chat, chat_filter, type_filter, network_filter, account_ids):
-    if account_ids:
+    if account_ids is not None:
         acct = str(pick(chat.get("account_id"), chat.get("account", {}).get("id"), ""))
-        if acct and acct not in account_ids:
+        if not acct or acct not in account_ids:
             return False
     if chat_filter:
         values = {
@@ -220,6 +220,67 @@ def participant_record(raw, chat, account):
         "is_self": bool(pick(raw.get("is_self"), raw.get("self"), False)),
         "metadata": json_text(metadata),
     }
+
+
+def message_sort_key(raw):
+    return str(pick(raw.get("sortKey"), raw.get("sort_key"), raw.get("cursor"), ""))
+
+
+def reply_parent_external_id(chat_id, message):
+    parent_raw = pick(
+        message.get("linkedMessageID"),
+        message.get("linked_message_id"),
+        message.get("reply_to"),
+        message.get("parent_id"),
+        message.get("thread_parent_id"),
+        "",
+    )
+    return f"{chat_id}:{parent_raw}" if parent_raw else ""
+
+
+def fetch_messages(base_url, chat_id, token, timeout, state, message_limit):
+    page_cursor = str(pick(state.get("message_cursor"), state.get("cursor"), "")).strip()
+    direction = "forward" if page_cursor else "backward"
+    remaining = message_limit if message_limit > 0 else None
+    messages = []
+    latest_cursor = page_cursor
+
+    while True:
+        params = {"direction": direction}
+        if page_cursor:
+            params["cursor"] = page_cursor
+        if remaining is not None:
+            params["limit"] = min(remaining, 200)
+        elif message_limit > 0:
+            params["limit"] = min(message_limit, 200)
+        page = request_json(
+            base_url,
+            f"/v1/chats/{urllib.parse.quote(chat_id, safe='')}/messages",
+            token,
+            timeout,
+            params=params,
+        )
+        page_messages = [item for item in as_list(page) if isinstance(item, dict)]
+        messages.extend(page_messages)
+        for item in page_messages:
+            sort_key = message_sort_key(item)
+            if sort_key:
+                latest_cursor = sort_key
+        if remaining is not None:
+            remaining -= len(page_messages)
+            if remaining <= 0:
+                break
+        has_more = bool(pick(page.get("hasMore"), page.get("has_more"), False)) if isinstance(page, dict) else False
+        next_cursor = ""
+        if isinstance(page, dict):
+            next_cursor = str(pick(page.get("next_cursor"), page.get("cursor"), "")).strip()
+        if not has_more or not page_messages:
+            break
+        page_cursor = next_cursor or message_sort_key(page_messages[-1])
+        if not page_cursor:
+            break
+
+    return messages, latest_cursor
 
 
 def main():
@@ -287,7 +348,7 @@ def main():
         sys.exit(2)
 
     selected_chats = []
-    account_ids = set(accounts_by_id.keys()) if accounts_by_id else set()
+    account_ids = set(accounts_by_id.keys()) if account_filter else None
     for chat in chats:
         if not isinstance(chat, dict):
             continue
@@ -354,19 +415,14 @@ def main():
 
         state = chat_state.get(chat_id, {}) if isinstance(chat_state.get(chat_id), dict) else {}
         watermark = normalize_time(state.get("watermark"))
-        params = {}
-        if message_limit > 0:
-            params["limit"] = message_limit
-        if watermark:
-            params["since"] = watermark
         try:
-            messages_raw = request_json(base_url, f"/v1/chats/{urllib.parse.quote(chat_id, safe='')}/messages", token, timeout, params=params)
-            messages = as_list(messages_raw)
+            messages, latest_cursor = fetch_messages(base_url, chat_id, token, timeout, state, message_limit)
         except Exception as exc:
             log("warn", f"Failed to fetch messages for {chat_id}: {exc}")
             new_state["chats"][chat_id] = {
-                "watermark": last_activity or watermark,
+                "watermark": watermark,
                 "last_chat_activity": last_activity,
+                "message_cursor": str(pick(state.get("message_cursor"), state.get("cursor"), "")).strip(),
             }
             continue
 
@@ -389,7 +445,6 @@ def main():
             msg_id = message_external_id(chat_id, message)
             if not msg_id:
                 continue
-            known_message_ids.add(msg_id)
             latest_seen = msg_time or latest_seen
 
             sender_info = pick(message.get("sender"), message.get("author"), message.get("user"), {})
@@ -411,10 +466,8 @@ def main():
             text = normalize_text(pick(message.get("text"), message.get("body"), message.get("content"), ""))
             snippet = text[:500]
             attachments = pick(message.get("attachments"), message.get("files"), [])
-            reply_to_raw = pick(message.get("reply_to"), message.get("parent_id"), message.get("thread_parent_id"), "")
-            reply_to = f"{chat_id}:{reply_to_raw}" if reply_to_raw else ""
-            if reply_to and reply_to not in known_message_ids:
-                reply_to = ""
+            reply_to = reply_parent_external_id(chat_id, message)
+            parent_id = reply_to if reply_to and reply_to in known_message_ids else ""
             permalink = str(pick(message.get("permalink"), message.get("url"), ""))[:4000]
 
             emit({
@@ -431,6 +484,7 @@ def main():
                     "status": str(pick(message.get("status"), message.get("delivery_status"), ""))[:200],
                     "message_type": str(pick(message.get("type"), message.get("msgtype"), "message"))[:200],
                     "reply_to": reply_to,
+                    "parent_id": parent_id,
                     "attachments": json_text(attachments),
                     "metadata": json_text(message),
                     "permalink": permalink,
@@ -438,11 +492,13 @@ def main():
                     "participant_id": participant_id,
                 },
             })
+            known_message_ids.add(msg_id)
             total_messages += 1
 
         new_state["chats"][chat_id] = {
             "watermark": latest_seen or last_activity or watermark,
             "last_chat_activity": last_activity,
+            "message_cursor": latest_cursor,
         }
 
     emit({"cursor": json.dumps(new_state, ensure_ascii=False, sort_keys=True)})

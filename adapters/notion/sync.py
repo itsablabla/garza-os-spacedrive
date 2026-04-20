@@ -318,6 +318,14 @@ def retrieve_page(token, page_id):
     return notion_request("GET", f"/pages/{page_id}", token)
 
 
+def should_reconcile_deletes(page_limit, page_count, truncated):
+    if page_limit <= 0:
+        return True
+    if truncated:
+        return False
+    return page_count < page_limit
+
+
 def main():
     config, cursor_text = parse_input()
     token = str(config.get("integration_token") or "").strip()
@@ -342,6 +350,7 @@ def main():
 
     pages = {}
     data_source_names = {}
+    truncated = False
 
     try:
         for data_source_id in data_source_ids:
@@ -362,6 +371,7 @@ def main():
             if isinstance(item, dict) and item.get("object") == "page":
                 pages[item.get("id")] = item
                 if page_limit > 0 and len(pages) >= page_limit:
+                    truncated = True
                     break
     except Exception as exc:
         log("error", str(exc))
@@ -386,6 +396,7 @@ def main():
         edited_dt = parse_iso(last_edited)
         if last_cursor_time and edited_dt and edited_dt < last_cursor_time and page_id not in page_ids:
             if title_query or data_source_ids:
+                seen_ids.add(page_id)
                 continue
         title = extract_title(page)
         body_parts = [properties_text(page.get("properties"))]
@@ -448,7 +459,7 @@ def main():
         if last_edited and last_edited > max_edited:
             max_edited = last_edited
 
-    if not include_archived:
+    if not include_archived and should_reconcile_deletes(page_limit, len(pages), truncated):
         for page_id in prev_pages.keys():
             if page_id not in seen_ids:
                 emit({"delete": "page", "external_id": page_id})

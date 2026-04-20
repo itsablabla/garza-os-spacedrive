@@ -169,7 +169,8 @@ def extract_text_and_attachments(message: email.message.Message) -> Tuple[str, L
         payload = part.get_payload(decode=True) or b""
         content_id = sanitize_text(part.get("Content-ID", "")).strip("<>")
 
-        if filename or disposition in {"attachment", "inline"}:
+        is_inline_attachment = disposition == "inline" and content_type not in {"text/plain", "text/html"}
+        if filename or disposition == "attachment" or is_inline_attachment:
             attachments.append(
                 {
                     "filename": filename or "attachment",
@@ -597,17 +598,23 @@ def sync_mailbox(
     previous_uidvalidity = str(mailbox_cursor.get("uidvalidity", "") or "")
     previous_last_uid = parse_int(mailbox_cursor.get("last_uid"), 0)
 
+    backfill_incomplete = bool(mailbox_cursor.get("backfill_incomplete"))
     if previous_uidvalidity and previous_uidvalidity == uidvalidity and previous_last_uid > 0:
-        search_start = max(1, previous_last_uid - REFRESH_WINDOW + 1)
-        uids = search_uids(imap, f"UID {search_start}:*")
+        if backfill_incomplete:
+            uids = search_uids(imap, f"UID {previous_last_uid + 1}:*")
+        else:
+            search_start = max(1, previous_last_uid - REFRESH_WINDOW + 1)
+            uids = search_uids(imap, f"UID {search_start}:*")
     else:
         if previous_uidvalidity and previous_uidvalidity != uidvalidity:
             log("warn", f"UIDVALIDITY changed for '{mailbox}', restarting mailbox sync from the beginning")
         uids = search_uids(imap, "ALL")
 
     uids = sorted(dict.fromkeys(uids))
-    if remaining_budget is not None:
-        uids = uids[-remaining_budget:]
+    truncated = False
+    if remaining_budget is not None and len(uids) > remaining_budget:
+        uids = uids[:remaining_budget]
+        truncated = True
 
     label_cache = set()
     processed = 0
@@ -638,6 +645,7 @@ def sync_mailbox(
     return processed, {
         "uidvalidity": uidvalidity,
         "last_uid": highest_seen_uid,
+        "backfill_incomplete": truncated,
     }
 
 
