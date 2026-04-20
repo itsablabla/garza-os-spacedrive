@@ -1,0 +1,131 @@
+[adapter]
+id = "macos-imessage"
+name = "macOS Messages"
+description = "Index chats, participants, messages, and attachment references from the macOS Messages database. Read-only and defensive against schema drift."
+version = "0.1.0"
+author = "spacedrive"
+license = "MIT"
+icon = "message-square"
+min_spacedrive = "0.1.0"
+trust_tier = "authored"
+
+[adapter.runtime]
+command = "python3 sync.py"
+timeout = 900
+schedule = "*/15 * * * *"
+requires = ["python3 >= 3.9"]
+
+[[adapter.config]]
+key = "chat_db_path"
+name = "Messages Database Path"
+description = "Path to chat.db, usually ~/Library/Messages/chat.db"
+type = "string"
+required = true
+default = "~/Library/Messages/chat.db"
+
+[[adapter.config]]
+key = "attachments_root"
+name = "Attachments Root"
+description = "Path to the Messages Attachments directory, usually ~/Library/Messages/Attachments"
+type = "string"
+required = false
+default = "~/Library/Messages/Attachments"
+
+[[adapter.config]]
+key = "conversation_filter"
+name = "Conversation Filter"
+description = "Comma-separated chat GUIDs, display names, or titles to include"
+type = "string"
+required = false
+
+[[adapter.config]]
+key = "participant_filter"
+name = "Participant Filter"
+description = "Comma-separated participant handles or names to include"
+type = "string"
+required = false
+
+[[adapter.config]]
+key = "date_from"
+name = "Start Date"
+description = "Only index messages on or after this ISO 8601 timestamp"
+type = "string"
+required = false
+
+[[adapter.config]]
+key = "date_to"
+name = "End Date"
+description = "Only index messages before or at this ISO 8601 timestamp"
+type = "string"
+required = false
+
+[[adapter.config]]
+key = "max_messages"
+name = "Max Messages"
+description = "Maximum messages to fetch per sync. Use 0 for unlimited."
+type = "integer"
+required = false
+default = 5000
+
+[data_type]
+id = "chat"
+name = "Chat"
+icon = "message-square"
+
+[models.chat]
+fields.name = "string"
+fields.display_name = "string"
+fields.guid = "string"
+fields.service_name = "string"
+fields.is_group = "boolean"
+fields.last_message_at = "datetime"
+fields.participant_count = "integer"
+fields.metadata = "text"
+
+[models.participant]
+fields.handle = "string"
+fields.display_name = "string"
+fields.service = "string"
+fields.country = "string"
+fields.account = "string"
+fields.metadata = "text"
+
+[models.message]
+fields.text = "text"
+fields.snippet = "text"
+fields.sender = "string"
+fields.chat_name = "string"
+fields.service = "string"
+fields.timestamp = "datetime"
+fields.edited_at = "datetime"
+fields.is_from_me = "boolean"
+fields.is_read = "boolean"
+fields.item_type = "string"
+fields.associated_guid = "string"
+fields.reply_to = "string"
+fields.attachments = "text"
+fields.metadata = "text"
+
+[models.message.relations]
+belongs_to = ["chat", "participant"]
+self_referential = "parent_id"
+
+[models.attachment]
+fields.filename = "string"
+fields.path = "string"
+fields.mime_type = "string"
+fields.transfer_name = "string"
+fields.total_bytes = "integer"
+fields.created_at = "datetime"
+fields.metadata = "text"
+
+[models.attachment.relations]
+belongs_to = ["message"]
+
+[search]
+primary_model = "message"
+title = "sender"
+preview = "text"
+subtitle = "chat_name"
+search_fields = ["text", "snippet", "sender", "chat_name", "attachments", "metadata"]
+date_field = "timestamp"

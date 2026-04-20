@@ -1,0 +1,96 @@
+[adapter]
+id = "notion"
+name = "Notion"
+description = "Index pages and data source content from Notion using a read-only integration token. Flattens blocks and rich text for durable archive search."
+version = "0.1.0"
+author = "spacedrive"
+license = "MIT"
+icon = "note"
+min_spacedrive = "0.1.0"
+trust_tier = "collaborative"
+
+[adapter.runtime]
+command = "python3 sync.py"
+timeout = 900
+schedule = "*/10 * * * *"
+requires = ["python3 >= 3.9"]
+
+[[adapter.config]]
+key = "integration_token"
+name = "Integration Token"
+description = "Internal integration token for the Notion workspace"
+type = "string"
+required = true
+secret = true
+
+[[adapter.config]]
+key = "data_source_ids"
+name = "Data Source IDs"
+description = "Optional comma-separated data source or database IDs to query directly"
+type = "string"
+required = false
+
+[[adapter.config]]
+key = "page_ids"
+name = "Page IDs"
+description = "Optional comma-separated Notion page IDs to always index directly"
+type = "string"
+required = false
+
+[[adapter.config]]
+key = "title_query"
+name = "Title Query"
+description = "Optional search string used with Notion search"
+type = "string"
+required = false
+
+[[adapter.config]]
+key = "include_archived"
+name = "Include Archived"
+description = "Set to true to keep archived or trashed pages indexed"
+type = "boolean"
+required = false
+default = false
+
+[[adapter.config]]
+key = "page_limit"
+name = "Page Limit"
+description = "Maximum pages to fetch per sync. Use 0 for unlimited."
+type = "integer"
+required = false
+default = 250
+
+[data_type]
+id = "knowledge"
+name = "Knowledge"
+icon = "note"
+
+[models.page]
+fields.title = "string"
+fields.body = "text"
+fields.snippet = "text"
+fields.url = "string"
+fields.public_url = "string"
+fields.parent_type = "string"
+fields.parent_id = "string"
+fields.data_source_id = "string"
+fields.data_source_name = "string"
+fields.created_by = "string"
+fields.last_edited_by = "string"
+fields.created_time = "datetime"
+fields.last_edited_time = "datetime"
+fields.archived = "boolean"
+fields.trashed = "boolean"
+fields.locked = "boolean"
+fields.icon = "string"
+fields.cover = "string"
+fields.properties = "text"
+fields.metadata = "text"
+
+[search]
+primary_model = "page"
+title = "title"
+preview = "body"
+subtitle = "data_source_name"
+search_fields = ["title", "body", "snippet", "data_source_name", "properties", "metadata"]
+date_field = "last_edited_time"
