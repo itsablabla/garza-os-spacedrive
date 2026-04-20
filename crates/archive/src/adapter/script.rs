@@ -107,6 +107,20 @@ fn default_config_type() -> String {
 	"string".to_string()
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct AdapterSyncInput {
+	config: serde_json::Value,
+	cursor: Option<String>,
+}
+
+fn serialize_sync_input(config: &serde_json::Value, cursor: Option<String>) -> Result<String> {
+	serde_json::to_string(&AdapterSyncInput {
+		config: config.clone(),
+		cursor,
+	})
+	.map_err(|e| Error::AdapterSync(format!("failed to serialize config: {e}")))
+}
+
 impl AdapterManifest {
 	/// Parse an `adapter.toml` file.
 	pub fn parse(toml_str: &str) -> Result<Self> {
@@ -477,13 +491,13 @@ impl Adapter for ScriptAdapter {
 				.stdout
 				.take()
 				.ok_or_else(|| Error::AdapterSync("failed to open stdout".into()))?;
-			let stderr = child
+			let _stderr = child
 				.stderr
 				.take()
 				.ok_or_else(|| Error::AdapterSync("failed to open stderr".into()))?;
 
-			let config_json = serde_json::to_string(config)
-				.map_err(|e| Error::AdapterSync(format!("failed to serialize config: {e}")))?;
+			let cursor = db.get_cursor("default").await?;
+			let config_json = serialize_sync_input(config, cursor)?;
 
 			tokio::spawn(async move {
 				let _ = stdin.write_all(config_json.as_bytes()).await;
@@ -572,5 +586,57 @@ impl Adapter for ScriptAdapter {
 
 			Ok(report)
 		})
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn serialize_sync_input_includes_cursor() {
+		let config = serde_json::json!({
+			"token": "secret",
+			"history_limit": 250
+		});
+
+		let serialized =
+			serialize_sync_input(&config, Some("{\"channels\":{}}".to_string())).unwrap();
+		let parsed: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+
+		assert_eq!(parsed["config"], config);
+		assert_eq!(parsed["cursor"], "{\"channels\":{}}");
+	}
+
+	#[test]
+	fn serialize_sync_input_allows_missing_cursor() {
+		let config = serde_json::json!({
+			"token": "secret"
+		});
+
+		let serialized = serialize_sync_input(&config, None).unwrap();
+		let parsed: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+
+		assert_eq!(parsed["config"], config);
+		assert!(parsed["cursor"].is_null());
+	}
+
+	#[test]
+	fn parse_slack_live_manifest() {
+		let manifest_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+			.parent()
+			.and_then(|path| path.parent())
+			.expect("workspace root")
+			.join("adapters/slack-live/adapter.toml");
+
+		let manifest = AdapterManifest::from_file(&manifest_path).unwrap();
+		let schema = manifest.extract_schema().unwrap();
+
+		assert_eq!(manifest.adapter.id, "slack-live");
+		assert_eq!(schema.data_type.id, "chat");
+		assert_eq!(schema.search.primary_model, "message");
+		assert!(schema.models.contains_key("channel"));
+		assert!(schema.models.contains_key("user"));
+		assert!(schema.models.contains_key("workspace"));
 	}
 }

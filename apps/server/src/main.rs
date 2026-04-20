@@ -307,11 +307,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 			// home directory can't be resolved.
 			std::env::var("DATA_DIR")
 				.map(PathBuf::from)
-				.or_else(|_| {
-					dirs::home_dir()
-						.map(|h| h.join(".spacedrive"))
-						.ok_or(())
-				})
+				.or_else(|_| dirs::home_dir().map(|h| h.join(".spacedrive")).ok_or(()))
 				.unwrap_or_else(|_| {
 					warn!("Could not resolve home directory; falling back to tempdir");
 					let temp = tempfile::tempdir().expect("Failed to create temp dir");
