@@ -1,0 +1,157 @@
+[adapter]
+id = "slack-live"
+name = "Slack API"
+description = "Index live channels, direct messages, threads, users, and reactions from Slack via the Web API. Read-only archival and search."
+version = "0.1.0"
+author = "spacedrive"
+license = "MIT"
+icon = "message-square"
+min_spacedrive = "0.1.0"
+trust_tier = "collaborative"
+
+[adapter.runtime]
+command = "python3 sync.py"
+timeout = 900
+schedule = "*/5 * * * *"
+requires = ["python3 >= 3.9"]
+
+[[adapter.config]]
+key = "token"
+name = "Slack Workspace Token"
+description = "Slack user or bot token with read scopes for conversations, history, threads, and users (for example: channels:read, groups:read, im:read, mpim:read, channels:history, groups:history, im:history, mpim:history, users:read)."
+type = "string"
+required = true
+secret = true
+
+[[adapter.config]]
+key = "channel_names"
+name = "Channel Name Filter"
+description = "Comma-separated channel names to sync. Leave blank to sync every accessible conversation."
+type = "string"
+required = false
+
+[[adapter.config]]
+key = "channel_ids"
+name = "Channel ID Filter"
+description = "Comma-separated Slack conversation IDs to sync. Applied in addition to channel name filtering."
+type = "string"
+required = false
+
+[[adapter.config]]
+key = "history_limit"
+name = "History Limit Per Conversation"
+description = "Maximum root messages to fetch per conversation on each sync. Use 0 for unlimited."
+type = "integer"
+required = false
+default = 1000
+
+[[adapter.config]]
+key = "full_history_days"
+name = "Initial History Window (Days)"
+description = "Limit the first sync to the last N days of history. Use 0 to index all accessible history."
+type = "integer"
+required = false
+default = 0
+
+[[adapter.config]]
+key = "include_archived"
+name = "Include Archived Conversations"
+description = "Set to true to index archived channels and DMs."
+type = "boolean"
+required = false
+default = false
+
+[[adapter.config]]
+key = "include_private"
+name = "Include Private Channels"
+description = "Set to false to skip private channels."
+type = "boolean"
+required = false
+default = true
+
+[[adapter.config]]
+key = "include_direct_messages"
+name = "Include Direct Messages"
+description = "Set to false to skip one-to-one direct messages."
+type = "boolean"
+required = false
+default = true
+
+[[adapter.config]]
+key = "include_group_dms"
+name = "Include Group DMs"
+description = "Set to false to skip multi-person direct messages."
+type = "boolean"
+required = false
+default = true
+
+[data_type]
+id = "chat"
+name = "Chat"
+icon = "message-square"
+
+[models.workspace]
+fields.name = "string"
+fields.team_id = "string"
+fields.url = "string"
+fields.domain = "string"
+fields.enterprise_id = "string"
+fields.enterprise_name = "string"
+
+[models.channel]
+fields.name = "string"
+fields.display_name = "string"
+fields.kind = "string"
+fields.topic = "text"
+fields.purpose = "text"
+fields.is_archived = "boolean"
+fields.is_private = "boolean"
+fields.is_shared = "boolean"
+fields.is_member = "boolean"
+fields.member_count = "integer"
+fields.created_at = "datetime"
+belongs_to = ["workspace"]
+has_many = ["message"]
+
+[models.user]
+fields.username = "string"
+fields.display_name = "string"
+fields.real_name = "string"
+fields.email = "string"
+fields.title = "string"
+fields.avatar_url = "string"
+fields.tz = "string"
+fields.is_bot = "boolean"
+fields.is_admin = "boolean"
+fields.is_owner = "boolean"
+fields.is_deleted = "boolean"
+belongs_to = ["workspace"]
+
+[models.message]
+fields.text = "text"
+fields.author = "string"
+fields.channel_name = "string"
+fields.channel_kind = "string"
+fields.subtype = "string"
+fields.timestamp = "datetime"
+fields.edited_at = "datetime"
+fields.thread_ts = "string"
+fields.reply_count = "integer"
+fields.is_thread_reply = "boolean"
+fields.reactions = "string"
+fields.mentions = "string"
+fields.files = "string"
+fields.metadata = "text"
+fields.permalink = "string"
+
+[models.message.relations]
+belongs_to = ["channel", "user"]
+self_referential = "parent_id"
+
+[search]
+primary_model = "message"
+title = "author"
+preview = "text"
+subtitle = "channel_name"
+search_fields = ["text", "author", "channel_name", "channel_kind", "subtype", "reactions", "mentions", "files", "metadata"]
+date_field = "timestamp"

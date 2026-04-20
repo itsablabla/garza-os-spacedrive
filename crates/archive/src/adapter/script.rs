@@ -3,7 +3,6 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -105,6 +104,20 @@ pub struct ConfigField {
 
 fn default_config_type() -> String {
 	"string".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct AdapterSyncInput {
+	config: serde_json::Value,
+	cursor: Option<String>,
+}
+
+fn serialize_sync_input(config: &serde_json::Value, cursor: Option<String>) -> Result<String> {
+	serde_json::to_string(&AdapterSyncInput {
+		config: config.clone(),
+		cursor,
+	})
+	.map_err(|e| Error::AdapterSync(format!("failed to serialize adapter input: {e}")))
 }
 
 impl AdapterManifest {
@@ -477,13 +490,13 @@ impl Adapter for ScriptAdapter {
 				.stdout
 				.take()
 				.ok_or_else(|| Error::AdapterSync("failed to open stdout".into()))?;
-			let stderr = child
+			let _stderr = child
 				.stderr
 				.take()
 				.ok_or_else(|| Error::AdapterSync("failed to open stderr".into()))?;
 
-			let config_json = serde_json::to_string(config)
-				.map_err(|e| Error::AdapterSync(format!("failed to serialize config: {e}")))?;
+			let cursor = db.get_cursor("default").await?;
+			let config_json = serialize_sync_input(config, cursor)?;
 
 			tokio::spawn(async move {
 				let _ = stdin.write_all(config_json.as_bytes()).await;
@@ -572,5 +585,39 @@ impl Adapter for ScriptAdapter {
 
 			Ok(report)
 		})
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn serialize_sync_input_includes_config_and_cursor() {
+		let config = serde_json::json!({
+			"token": "secret",
+			"history_limit": 250
+		});
+
+		let serialized =
+			serialize_sync_input(&config, Some("{\"channels\":{}}".to_string())).unwrap();
+		let parsed: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+
+		assert_eq!(parsed["config"], config);
+		assert_eq!(parsed["cursor"], "{\"channels\":{}}");
+	}
+
+	#[test]
+	fn serialize_sync_input_allows_missing_cursor() {
+		let config = serde_json::json!({
+			"host": "127.0.0.1",
+			"port": 1143
+		});
+
+		let serialized = serialize_sync_input(&config, None).unwrap();
+		let parsed: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+
+		assert_eq!(parsed["config"], config);
+		assert!(parsed["cursor"].is_null());
 	}
 }

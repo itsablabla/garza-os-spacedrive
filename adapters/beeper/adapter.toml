@@ -1,0 +1,167 @@
+[adapter]
+id = "beeper"
+name = "Beeper Desktop"
+description = "Index chats, participants, accounts, and messages from the local or remotely exposed Beeper Desktop HTTP API. Read-only archival sync for search."
+version = "0.1.0"
+author = "spacedrive"
+license = "MIT"
+icon = "message-square"
+min_spacedrive = "0.1.0"
+trust_tier = "collaborative"
+
+[adapter.runtime]
+command = "python3 sync.py"
+timeout = 900
+schedule = "*/10 * * * *"
+requires = ["python3 >= 3.9"]
+
+[[adapter.config]]
+key = "base_url"
+name = "Beeper API Base URL"
+description = "Base URL for the Beeper Desktop HTTP API, for example http://127.0.0.1:23317"
+type = "string"
+required = true
+default = "http://127.0.0.1:23317"
+
+[[adapter.config]]
+key = "bearer_token"
+name = "Bearer Token"
+description = "Optional bearer token for remotely exposed or protected Beeper Desktop API instances"
+type = "string"
+required = false
+secret = true
+
+[[adapter.config]]
+key = "account_filter"
+name = "Account Filter"
+description = "Comma-separated account IDs, bridge IDs, or service names to include"
+type = "string"
+required = false
+
+[[adapter.config]]
+key = "network_filter"
+name = "Network Filter"
+description = "Comma-separated network or service names to include, such as imessage, whatsapp, or telegram"
+type = "string"
+required = false
+
+[[adapter.config]]
+key = "chat_filter"
+name = "Chat Filter"
+description = "Comma-separated chat IDs, names, or normalized names to include"
+type = "string"
+required = false
+
+[[adapter.config]]
+key = "chat_type_filter"
+name = "Chat Type Filter"
+description = "Comma-separated chat types to include, such as dm, group, room, or space"
+type = "string"
+required = false
+
+[[adapter.config]]
+key = "date_from"
+name = "Start Date"
+description = "Only index messages on or after this ISO 8601 timestamp"
+type = "string"
+required = false
+
+[[adapter.config]]
+key = "date_to"
+name = "End Date"
+description = "Only index messages before or at this ISO 8601 timestamp"
+type = "string"
+required = false
+
+[[adapter.config]]
+key = "chat_limit"
+name = "Chat Limit"
+description = "Maximum chats to scan per sync. Use 0 for unlimited."
+type = "integer"
+required = false
+default = 0
+
+[[adapter.config]]
+key = "message_limit"
+name = "Message Limit Per Chat"
+description = "Maximum messages to fetch per chat on each sync. Use 0 for unlimited."
+type = "integer"
+required = false
+default = 500
+
+[[adapter.config]]
+key = "timeout_seconds"
+name = "HTTP Timeout"
+description = "Timeout for Beeper API requests in seconds"
+type = "integer"
+required = false
+default = 30
+
+[data_type]
+id = "chat"
+name = "Chat"
+icon = "message-square"
+
+[models.account]
+fields.name = "string"
+fields.network = "string"
+fields.account_id = "string"
+fields.bridge_id = "string"
+fields.status = "string"
+fields.user_id = "string"
+fields.metadata = "text"
+has_many = ["chat"]
+
+[models.chat]
+fields.name = "string"
+fields.normalized_name = "string"
+fields.chat_type = "string"
+fields.network = "string"
+fields.topic = "text"
+fields.account_id = "string"
+fields.last_activity_at = "datetime"
+fields.unread_count = "integer"
+fields.is_archived = "boolean"
+fields.metadata = "text"
+
+[models.chat.relations]
+belongs_to = ["account"]
+many_to_many = ["participant"]
+
+[models.participant]
+fields.display_name = "string"
+fields.handle = "string"
+fields.network = "string"
+fields.avatar_url = "string"
+fields.is_self = "boolean"
+fields.metadata = "text"
+
+[models.participant.relations]
+many_to_many = ["chat"]
+
+[models.message]
+fields.text = "text"
+fields.snippet = "text"
+fields.sender = "string"
+fields.chat_name = "string"
+fields.network = "string"
+fields.timestamp = "datetime"
+fields.edited_at = "datetime"
+fields.status = "string"
+fields.message_type = "string"
+fields.reply_to = "string"
+fields.attachments = "text"
+fields.metadata = "text"
+fields.permalink = "string"
+
+[models.message.relations]
+belongs_to = ["chat", "participant"]
+self_referential = "parent_id"
+
+[search]
+primary_model = "message"
+title = "sender"
+preview = "text"
+subtitle = "chat_name"
+search_fields = ["text", "snippet", "sender", "chat_name", "network", "attachments", "metadata"]
+date_field = "timestamp"
