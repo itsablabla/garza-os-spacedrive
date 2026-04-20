@@ -1,24 +1,27 @@
-import { useState, useEffect, useRef } from "react";
-import { useForm } from "react-hook-form";
 import {
 	Books,
-	FolderOpen,
-	CircleNotch,
 	CheckCircle,
-	Warning,
-} from "@phosphor-icons/react";
+	CircleNotch,
+	FolderOpen,
+	Warning
+} from '@phosphor-icons/react';
+import type {Event} from '@sd/ts-client';
+import {queryClient} from '@sd/ts-client/hooks';
 import {
 	Button,
-	Input,
-	Label,
 	Dialog,
 	dialogManager,
-	useDialog,
-} from "@spacedrive/primitives";
-import { queryClient } from "@sd/ts-client/hooks";
-import type { Event } from "@sd/ts-client";
-import { useCoreMutation, useSpacedriveClient } from "../../contexts/SpacedriveContext";
-import { usePlatform } from "../../contexts/PlatformContext";
+	Input,
+	Label,
+	useDialog
+} from '@spacedrive/primitives';
+import {useEffect, useRef, useState} from 'react';
+import {useForm} from 'react-hook-form';
+import {usePlatform} from '../../contexts/PlatformContext';
+import {
+	useCoreMutation,
+	useSpacedriveClient
+} from '../../contexts/SpacedriveContext';
 
 interface CreateLibraryDialogProps {
 	id: number;
@@ -30,7 +33,10 @@ interface CreateLibraryFormData {
 	path: string | null;
 }
 
-type DialogStep = "form" | "creating" | "success" | "error";
+type DialogStep = 'form' | 'creating' | 'success' | 'error';
+
+const LIBRARY_CREATE_CLOSE_DELAY_MS = 1500;
+const DEFAULT_SUCCESS_DETAIL = 'Finishing setup. This closes automatically.';
 
 /**
  * Hook to open the Create Library dialog
@@ -45,7 +51,7 @@ type DialogStep = "form" | "creating" | "success" | "error";
  * ```
  */
 export function useCreateLibraryDialog(
-	onLibraryCreated?: (libraryId: string) => void,
+	onLibraryCreated?: (libraryId: string) => void
 ) {
 	return dialogManager.create((props: CreateLibraryDialogProps) => (
 		<CreateLibraryDialog {...props} onLibraryCreated={onLibraryCreated} />
@@ -57,154 +63,190 @@ function CreateLibraryDialog(props: CreateLibraryDialogProps) {
 	const client = useSpacedriveClient();
 	const platform = usePlatform();
 
-	const [step, setStep] = useState<DialogStep>("form");
+	const [step, setStep] = useState<DialogStep>('form');
 	const [errorMessage, setErrorMessage] = useState<string | null>(null);
+	const [successDetail, setSuccessDetail] = useState(DEFAULT_SUCCESS_DETAIL);
 
-	const createLibrary = useCoreMutation("libraries.create");
+	const createLibrary = useCoreMutation('libraries.create');
 
-	// Track unsubscribe function and pending library ID in refs
 	const unsubscribeRef = useRef<(() => void) | null>(null);
+	const closeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 	const pendingLibraryIdRef = useRef<string | null>(null);
-	// Buffer to store events received before we know the library ID
-	const receivedEventsRef = useRef<Array<{ id: string; name: string; path: string }>>([]);
+	const receivedEventsRef = useRef<
+		Array<{id: string; name: string; path: string}>
+	>([]);
 
 	const form = useForm<CreateLibraryFormData>({
 		defaultValues: {
-			name: "",
-			path: null,
-		},
+			name: '',
+			path: null
+		}
 	});
+
+	const cleanupAsyncState = () => {
+		if (unsubscribeRef.current) {
+			unsubscribeRef.current();
+			unsubscribeRef.current = null;
+		}
+
+		if (closeTimeoutRef.current) {
+			clearTimeout(closeTimeoutRef.current);
+			closeTimeoutRef.current = null;
+		}
+	};
+
+	const closeDialog = () => {
+		cleanupAsyncState();
+		pendingLibraryIdRef.current = null;
+		receivedEventsRef.current = [];
+		dialog.state.open = false;
+	};
+
+	const scheduleClose = () => {
+		if (closeTimeoutRef.current) {
+			clearTimeout(closeTimeoutRef.current);
+		}
+
+		closeTimeoutRef.current = setTimeout(() => {
+			closeDialog();
+		}, LIBRARY_CREATE_CLOSE_DELAY_MS);
+	};
 
 	// Clean up subscription on unmount
 	useEffect(() => {
 		return () => {
-			if (unsubscribeRef.current) {
-				unsubscribeRef.current();
-				unsubscribeRef.current = null;
-			}
+			cleanupAsyncState();
 		};
 	}, []);
 
 	const handleBrowse = async () => {
 		if (!platform.openDirectoryPickerDialog) {
-			console.error("Directory picker not available on this platform");
+			console.error('Directory picker not available on this platform');
 			return;
 		}
 
 		const selected = await platform.openDirectoryPickerDialog({
-			title: "Choose library location",
-			multiple: false,
+			title: 'Choose library location',
+			multiple: false
 		});
 
-		if (selected && typeof selected === "string") {
-			form.setValue("path", selected);
+		if (selected && typeof selected === 'string') {
+			form.setValue('path', selected);
 		}
 	};
 
 	const onSubmit = form.handleSubmit(async (data) => {
 		if (!data.name.trim()) {
-			form.setError("name", {
-				type: "manual",
-				message: "Library name is required",
+			form.setError('name', {
+				type: 'manual',
+				message: 'Library name is required'
 			});
 			return;
 		}
 
-		setStep("creating");
+		setStep('creating');
 		setErrorMessage(null);
+		setSuccessDetail(DEFAULT_SUCCESS_DETAIL);
 		receivedEventsRef.current = [];
+		pendingLibraryIdRef.current = null;
+		cleanupAsyncState();
 
-		// Set up event subscription BEFORE making the mutation
-		// This ensures we don't miss the LibraryCreated event
 		try {
 			const unsubscribe = await client.subscribe((event: Event) => {
-				if (
-					typeof event === "object" &&
-					"LibraryCreated" in event
-				) {
-					const libraryEvent = event.LibraryCreated;
+				if (typeof event !== 'object' || !('LibraryCreated' in event)) {
+					return;
+				}
 
-					// If we already know the library ID, check for match and close
-					if (pendingLibraryIdRef.current === libraryEvent.id) {
-						dialog.state.open = false;
-						if (unsubscribeRef.current) {
-							unsubscribeRef.current();
-							unsubscribeRef.current = null;
-						}
-					} else {
-						// Buffer the event in case it arrives before mutation resolves
-						receivedEventsRef.current.push(libraryEvent);
-					}
+				const libraryEvent = event.LibraryCreated;
+
+				if (pendingLibraryIdRef.current === libraryEvent.id) {
+					closeDialog();
+				} else {
+					receivedEventsRef.current.push(libraryEvent);
 				}
 			});
+
 			unsubscribeRef.current = unsubscribe;
 		} catch (err) {
-			console.error("Failed to subscribe to events:", err);
+			console.error('Failed to subscribe to events:', err);
 		}
 
 		try {
 			const result = await createLibrary.mutateAsync({
 				name: data.name.trim(),
-				path: data.path,
+				path: data.path
 			});
 
-			// Store the library ID we're waiting for
 			pendingLibraryIdRef.current = result.library_id;
 
-			// Check if we already received the event (race condition handling)
 			const alreadyReceived = receivedEventsRef.current.some(
 				(e) => e.id === result.library_id
 			);
 
-			// Invalidate the libraries list query to refresh UI
-			// Query key format is [query.type, query.input], so we match on the type prefix
-			await queryClient.invalidateQueries({ queryKey: ["libraries.list"] });
-			// Also invalidate core.status which includes library list
-			await queryClient.invalidateQueries({ queryKey: ["core.status"] });
+			let postCreateWarning: string | null = null;
 
-			// Switch to the new library
-			if (platform.setCurrentLibraryId) {
-				// Tauri: Use platform method to sync across all windows
-				await platform.setCurrentLibraryId(result.library_id);
-			} else {
-				// Web fallback: Just update the client
-				client.setCurrentLibrary(result.library_id);
+			try {
+				await queryClient.invalidateQueries({
+					queryKey: ['libraries.list']
+				});
+				await queryClient.invalidateQueries({
+					queryKey: ['core.status']
+				});
+			} catch (error) {
+				console.error('Failed to refresh library queries:', error);
+				postCreateWarning =
+					'Library created, but the library list may need a refresh.';
 			}
 
-			// Call the callback if provided
-			if (props.onLibraryCreated) {
-				props.onLibraryCreated(result.library_id);
-			}
-
-			if (alreadyReceived) {
-				// Event was already received, close immediately
-				dialog.state.open = false;
-				if (unsubscribeRef.current) {
-					unsubscribeRef.current();
-					unsubscribeRef.current = null;
+			try {
+				if (platform.setCurrentLibraryId) {
+					await platform.setCurrentLibraryId(result.library_id);
+				} else {
+					client.setCurrentLibrary(result.library_id);
 				}
-			} else {
-				// Show success state while waiting for event
-				setStep("success");
-				// Dialog will close when LibraryCreated event is received
+			} catch (error) {
+				console.error(
+					'Failed to switch libraries after create:',
+					error
+				);
+				client.setCurrentLibrary(result.library_id);
+				postCreateWarning =
+					'Library created, but automatic switching failed. Use the library switcher if needed.';
 			}
-		} catch (error) {
-			console.error("Failed to create library:", error);
-			setErrorMessage(
-				error instanceof Error ? error.message : "Failed to create library",
-			);
-			setStep("error");
 
-			// Clean up subscription on error
-			if (unsubscribeRef.current) {
-				unsubscribeRef.current();
-				unsubscribeRef.current = null;
+			if (props.onLibraryCreated) {
+				try {
+					props.onLibraryCreated(result.library_id);
+				} catch (error) {
+					console.error(
+						'Failed to run library created callback:',
+						error
+					);
+				}
 			}
+
+			if (alreadyReceived && !postCreateWarning) {
+				closeDialog();
+				return;
+			}
+
+			setSuccessDetail(postCreateWarning ?? DEFAULT_SUCCESS_DETAIL);
+			setStep('success');
+			scheduleClose();
+		} catch (error) {
+			console.error('Failed to create library:', error);
+			setErrorMessage(
+				error instanceof Error
+					? error.message
+					: 'Failed to create library'
+			);
+			setStep('error');
+			cleanupAsyncState();
 		}
 	});
 
 	// Creating state
-	if (step === "creating") {
+	if (step === 'creating') {
 		return (
 			<Dialog
 				dialog={dialog}
@@ -213,16 +255,16 @@ function CreateLibraryDialog(props: CreateLibraryDialogProps) {
 				icon={<Books size={20} weight="fill" />}
 				hideButtons
 			>
-				<div className="flex flex-col items-center justify-center py-8 gap-4">
+				<div className="flex flex-col items-center justify-center gap-4 py-8">
 					<CircleNotch
-						className="size-12 text-accent animate-spin"
+						className="text-accent size-12 animate-spin"
 						weight="bold"
 					/>
 					<div className="text-center">
-						<p className="text-sm font-medium text-ink">
+						<p className="text-ink text-sm font-medium">
 							Creating your library...
 						</p>
-						<p className="text-xs text-ink-dull mt-1">
+						<p className="text-ink-dull mt-1 text-xs">
 							This may take a moment
 						</p>
 					</div>
@@ -231,8 +273,7 @@ function CreateLibraryDialog(props: CreateLibraryDialogProps) {
 		);
 	}
 
-	// Success state - waiting for LibraryCreated event
-	if (step === "success") {
+	if (step === 'success') {
 		return (
 			<Dialog
 				dialog={dialog}
@@ -241,17 +282,17 @@ function CreateLibraryDialog(props: CreateLibraryDialogProps) {
 				icon={<Books size={20} weight="fill" />}
 				hideButtons
 			>
-				<div className="flex flex-col items-center justify-center py-8 gap-4">
+				<div className="flex flex-col items-center justify-center gap-4 py-8">
 					<CheckCircle
 						className="size-12 text-green-500"
 						weight="fill"
 					/>
 					<div className="text-center">
-						<p className="text-sm font-medium text-ink">
+						<p className="text-ink text-sm font-medium">
 							Library created successfully!
 						</p>
-						<p className="text-xs text-ink-dull mt-1">
-							Initializing...
+						<p className="text-ink-dull mt-1 text-xs">
+							{successDetail}
 						</p>
 					</div>
 				</div>
@@ -260,30 +301,29 @@ function CreateLibraryDialog(props: CreateLibraryDialogProps) {
 	}
 
 	// Error state
-	if (step === "error") {
+	if (step === 'error') {
 		return (
 			<Dialog
 				dialog={dialog}
 				form={form}
 				title="Error"
-				icon={<Warning size={20} weight="fill" className="text-red-500" />}
+				icon={
+					<Warning size={20} weight="fill" className="text-red-500" />
+				}
 				ctaLabel="Try Again"
 				onSubmit={async () => {
-					setStep("form");
+					setStep('form');
 					setErrorMessage(null);
 				}}
 				onCancelled={true}
 			>
-				<div className="flex flex-col items-center justify-center py-6 gap-4">
-					<Warning
-						className="size-12 text-red-500"
-						weight="fill"
-					/>
+				<div className="flex flex-col items-center justify-center gap-4 py-6">
+					<Warning className="size-12 text-red-500" weight="fill" />
 					<div className="text-center">
-						<p className="text-sm font-medium text-ink">
+						<p className="text-ink text-sm font-medium">
 							Failed to create library
 						</p>
-						<p className="text-xs text-red-400 mt-1">
+						<p className="mt-1 text-xs text-red-400">
 							{errorMessage}
 						</p>
 					</div>
@@ -309,7 +349,9 @@ function CreateLibraryDialog(props: CreateLibraryDialogProps) {
 				<div className="space-y-2">
 					<Label slug="name">Library Name</Label>
 					<Input
-						{...form.register("name", { required: "Name is required" })}
+						{...form.register('name', {
+							required: 'Name is required'
+						})}
 						size="md"
 						placeholder="My Library"
 						autoFocus
@@ -324,18 +366,20 @@ function CreateLibraryDialog(props: CreateLibraryDialogProps) {
 
 				<div className="space-y-2">
 					<Label>
-						Location{" "}
-						<span className="text-ink-faint font-normal">(optional)</span>
+						Location{' '}
+						<span className="text-ink-faint font-normal">
+							(optional)
+						</span>
 					</Label>
 					<div className="relative">
 						<Input
-							value={form.watch("path") || ""}
+							value={form.watch('path') || ''}
 							onChange={(e) =>
-								form.setValue("path", e.target.value || null)
+								form.setValue('path', e.target.value || null)
 							}
 							size="md"
 							placeholder="Default location"
-							className="pr-12 bg-app-input"
+							className="bg-app-input pr-12"
 						/>
 						{platform.openDirectoryPickerDialog && (
 							<Button
@@ -349,7 +393,7 @@ function CreateLibraryDialog(props: CreateLibraryDialogProps) {
 							</Button>
 						)}
 					</div>
-					<p className="text-xs text-ink-faint">
+					<p className="text-ink-faint text-xs">
 						Leave empty to use the default location
 					</p>
 				</div>
