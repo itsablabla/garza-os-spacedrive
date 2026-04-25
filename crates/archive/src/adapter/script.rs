@@ -3,7 +3,6 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -105,6 +104,20 @@ pub struct ConfigField {
 
 fn default_config_type() -> String {
 	"string".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct AdapterSyncInput {
+	config: serde_json::Value,
+	cursor: Option<String>,
+}
+
+fn serialize_sync_input(config: &serde_json::Value, cursor: Option<String>) -> Result<String> {
+	serde_json::to_string(&AdapterSyncInput {
+		config: config.clone(),
+		cursor,
+	})
+	.map_err(|e| Error::AdapterSync(format!("failed to serialize adapter input: {e}")))
 }
 
 impl AdapterManifest {
@@ -457,6 +470,8 @@ impl Adapter for ScriptAdapter {
 
 			let env = self.build_env(config);
 			let cmd = &self.manifest.adapter.runtime.command;
+			let cursor = db.get_cursor("default").await?;
+			let config_json = serialize_sync_input(config, cursor)?;
 
 			let mut child = Command::new("sh")
 				.arg("-c")
@@ -477,13 +492,10 @@ impl Adapter for ScriptAdapter {
 				.stdout
 				.take()
 				.ok_or_else(|| Error::AdapterSync("failed to open stdout".into()))?;
-			let stderr = child
+			let _stderr = child
 				.stderr
 				.take()
 				.ok_or_else(|| Error::AdapterSync("failed to open stderr".into()))?;
-
-			let config_json = serde_json::to_string(config)
-				.map_err(|e| Error::AdapterSync(format!("failed to serialize config: {e}")))?;
 
 			tokio::spawn(async move {
 				let _ = stdin.write_all(config_json.as_bytes()).await;
@@ -572,5 +584,110 @@ impl Adapter for ScriptAdapter {
 
 			Ok(report)
 		})
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use std::thread;
+	use std::time::Duration;
+
+	use tempfile::tempdir;
+
+	use crate::db::SourceDb;
+	use crate::schema::parser;
+
+	#[test]
+	fn serialize_sync_input_includes_config_and_cursor() {
+		let config = serde_json::json!({
+			"token": "secret",
+			"history_limit": 250
+		});
+
+		let serialized =
+			serialize_sync_input(&config, Some("{\"channels\":{}}".to_string())).unwrap();
+		let parsed: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+
+		assert_eq!(parsed["config"], config);
+		assert_eq!(parsed["cursor"], "{\"channels\":{}}");
+	}
+
+	#[test]
+	fn serialize_sync_input_allows_missing_cursor() {
+		let config = serde_json::json!({
+			"host": "127.0.0.1",
+			"port": 1143
+		});
+
+		let serialized = serialize_sync_input(&config, None).unwrap();
+		let parsed: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+
+		assert_eq!(parsed["config"], config);
+		assert!(parsed["cursor"].is_null());
+	}
+
+	#[tokio::test]
+	async fn sync_does_not_spawn_child_when_cursor_lookup_fails() {
+		let temp_dir = tempdir().unwrap();
+		let marker_path = temp_dir.path().join("adapter").join("spawned.txt");
+		let adapter_dir = temp_dir.path().join("adapter");
+		std::fs::create_dir_all(&adapter_dir).unwrap();
+
+		std::fs::write(
+			adapter_dir.join("adapter.toml"),
+			r#"
+[adapter]
+id = "test-adapter"
+name = "Test Adapter"
+
+[adapter.runtime]
+command = "python3 -c \"from pathlib import Path; Path('spawned.txt').write_text('yes')\""
+
+[data_type]
+id = "test"
+name = "Test"
+
+[models.item]
+fields.name = "string"
+
+[search]
+primary_model = "item"
+title = "name"
+preview = "name"
+search_fields = ["name"]
+"#,
+		)
+		.unwrap();
+
+		let adapter = ScriptAdapter::from_dir(&adapter_dir).unwrap();
+		let db_path = temp_dir.path().join("source.db");
+		let pool = sqlx::SqlitePool::connect(&format!("sqlite:{}?mode=rwc", db_path.display()))
+			.await
+			.unwrap();
+		let schema = parser::parse(
+			r#"
+[data_type]
+id = "test"
+name = "Test"
+
+[models.item]
+fields.name = "string"
+
+[search]
+primary_model = "item"
+title = "name"
+preview = "name"
+search_fields = ["name"]
+"#,
+		)
+		.unwrap();
+		let db = SourceDb::new(pool, schema);
+
+		let error = adapter.sync(&db, &serde_json::json!({})).await.unwrap_err();
+		assert!(matches!(error, Error::Database(_)));
+
+		thread::sleep(Duration::from_millis(100));
+		assert!(!marker_path.exists());
 	}
 }

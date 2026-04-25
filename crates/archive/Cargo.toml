@@ -38,3 +38,7 @@ dashmap  = { workspace = true }
 default = []
 # safety-screening feature temporarily disabled - requires proper TLS configuration for ort
 # safety-screening = ["dep:ort", "dep:tokenizers", "dep:hf-hub"]
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "fs", "io-util"] }
