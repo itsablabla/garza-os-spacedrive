@@ -13,6 +13,7 @@ API_BASE = "https://slack.com/api"
 MAX_RETRIES = 4
 PAGE_LIMIT = 200
 THREAD_STATE_LIMIT = 1000
+THREAD_REDISCOVERY_LIMIT = 4000
 THREAD_RETENTION_DAYS = 180
 HISTORY_OVERLAP_SECONDS = 120
 EDIT_REFRESH_DAYS = 14
@@ -464,15 +465,19 @@ class SlackArchiver:
 
         state = self.cursor_state["channels"].get(channel_id) or {}
         state.setdefault("threads", {})
+        state.setdefault("thread_roots", {})
 
         max_history_ts, thread_updates = self.sync_channel_history(conversation, state)
         thread_state = dict(state.get("threads") or {})
         thread_state.update(thread_updates)
-        thread_state = self.sync_threads(conversation, thread_state)
+        durable_roots = dict(state.get("thread_roots") or {})
+        durable_roots.update(thread_updates)
+        thread_state = self.sync_threads(conversation, thread_state, durable_roots)
 
         if max_history_ts:
             state["last_history_ts"] = max_history_ts
         state["threads"] = self.prune_threads(thread_state)
+        state["thread_roots"] = self.prune_thread_roots(durable_roots)
         self.cursor_state["channels"][channel_id] = state
         log("info", f"Synced {self.channel_display_name(conversation)}")
 
@@ -491,6 +496,8 @@ class SlackArchiver:
         refresh_latest = None
         if last_refresh_before_ts:
             refresh_latest = max(slack_ts_to_float(last_refresh_before_ts) - HISTORY_OVERLAP_SECONDS, 0.0)
+        elif last_history_ts:
+            refresh_latest = 0.0
 
         history_params = {
             "channel": channel_id,
@@ -538,6 +545,9 @@ class SlackArchiver:
                 break
             page_params["cursor"] = cursor
 
+        if refresh_latest is None and max_history_ts:
+            refresh_latest = 0.0
+
         if refresh_latest is not None and refresh_cutoff > 0:
             refresh_params = {
                 "channel": channel_id,
@@ -576,11 +586,12 @@ class SlackArchiver:
         state["last_refresh_before_ts"] = refresh_before_ts
         return max_history_ts, thread_updates
 
-    def sync_threads(self, conversation, thread_state):
+    def sync_threads(self, conversation, thread_state, durable_roots):
         channel_id = conversation["id"]
         channel_name = self.channel_display_name(conversation)
         updated_state = dict(thread_state)
-        for parent_ts, latest_reply_ts in sorted(thread_state.items(), key=lambda item: slack_ts_to_float(item[0])):
+        root_state = dict(durable_roots)
+        for parent_ts, latest_reply_ts in sorted(root_state.items(), key=lambda item: slack_ts_to_float(item[0])):
             oldest = max(slack_ts_to_float(latest_reply_ts) - HISTORY_OVERLAP_SECONDS, slack_ts_to_float(parent_ts))
             page_params = {
                 "channel": channel_id,
@@ -605,11 +616,15 @@ class SlackArchiver:
                     self.emit_message(conversation, reply)
                     if not latest_seen or slack_ts_to_float(ts_value) > slack_ts_to_float(latest_seen):
                         latest_seen = ts_value
+                    reply_thread_ts = normalize_ts_string(reply.get("thread_ts"))
+                    if reply_thread_ts:
+                        durable_roots[reply_thread_ts] = max(durable_roots.get(reply_thread_ts, reply_thread_ts), ts_value, key=slack_ts_to_float)
                 cursor = ((payload.get("response_metadata") or {}).get("next_cursor") or "").strip()
                 if not cursor:
                     break
                 page_params["cursor"] = cursor
             updated_state[parent_ts] = latest_seen or latest_reply_ts or parent_ts
+            durable_roots[parent_ts] = updated_state[parent_ts]
         return updated_state
 
     def emit_message(self, conversation, message):
@@ -731,6 +746,17 @@ class SlackArchiver:
             if len(pruned) >= THREAD_STATE_LIMIT:
                 break
             pruned[parent_ts] = latest_reply_ts
+        return pruned
+
+    def prune_thread_roots(self, thread_state):
+        if not thread_state:
+            return {}
+        rows = sorted(thread_state.items(), key=lambda item: slack_ts_to_float(item[1]), reverse=True)
+        pruned = {}
+        for parent_ts, latest_reply_ts in rows:
+            pruned[parent_ts] = latest_reply_ts
+            if len(pruned) >= THREAD_REDISCOVERY_LIMIT:
+                break
         return pruned
 
     def prune_removed_channels(self, active_ids):

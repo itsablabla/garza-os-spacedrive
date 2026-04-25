@@ -97,6 +97,7 @@ def notion_request(method, path, token, body=None):
 
 def paginate(method, path, token, body=None, result_key="results"):
     next_cursor = None
+    seen_cursors = set()
     while True:
         payload = dict(body or {})
         payload["page_size"] = PAGE_SIZE
@@ -114,8 +115,9 @@ def paginate(method, path, token, body=None, result_key="results"):
         if not response.get("has_more"):
             break
         next_cursor = response.get("next_cursor")
-        if not next_cursor:
+        if not next_cursor or next_cursor in seen_cursors:
             break
+        seen_cursors.add(next_cursor)
 
 
 def rich_text_to_plain(items):
@@ -326,6 +328,10 @@ def should_reconcile_deletes(page_limit, page_count, truncated):
     return page_count < page_limit
 
 
+def page_sort_time(page):
+    return page.get("last_edited_time") or page.get("created_time") or ""
+
+
 def main():
     config, cursor_text = parse_input()
     token = str(config.get("integration_token") or "").strip()
@@ -351,6 +357,7 @@ def main():
     pages = {}
     data_source_names = {}
     truncated = False
+    explicit_page_ids = set(page_ids)
 
     try:
         for data_source_id in data_source_ids:
@@ -370,20 +377,32 @@ def main():
         for item in paginate("POST", "/search", token, body=search_body):
             if isinstance(item, dict) and item.get("object") == "page":
                 pages[item.get("id")] = item
-                if page_limit > 0 and len(pages) >= page_limit:
-                    truncated = True
-                    break
     except Exception as exc:
         log("error", str(exc))
         sys.exit(2)
 
     ordered_pages = sorted(
         [page for page in pages.values() if isinstance(page, dict)],
-        key=lambda page: page.get("last_edited_time") or page.get("created_time") or "",
+        key=page_sort_time,
+        reverse=True,
     )
 
     if page_limit > 0:
-        ordered_pages = ordered_pages[:page_limit]
+        prioritized_pages = []
+        backlog_pages = []
+        for page in ordered_pages:
+            page_id = page.get("id")
+            edited_dt = parse_iso(page.get("last_edited_time"))
+            if page_id in explicit_page_ids or (last_cursor_time and edited_dt and edited_dt >= last_cursor_time):
+                prioritized_pages.append(page)
+            else:
+                backlog_pages.append(page)
+        backlog_budget = max(page_limit - len(prioritized_pages), 0)
+        if len(backlog_pages) > backlog_budget:
+            truncated = True
+            backlog_pages = backlog_pages[:backlog_budget]
+        ordered_pages = prioritized_pages + backlog_pages
+    ordered_pages.sort(key=page_sort_time)
 
     synced = 0
     seen_ids = set()

@@ -610,7 +610,8 @@ def sync_mailbox(
             log("warn", f"UIDVALIDITY changed for '{mailbox}', restarting mailbox sync from the beginning")
         uids = search_uids(imap, "ALL")
 
-    uids = sorted(dict.fromkeys(uids))
+    all_uids = sorted(dict.fromkeys(uids))
+    uids = list(all_uids)
     truncated = False
     if remaining_budget is not None and len(uids) > remaining_budget:
         uids = uids[:remaining_budget]
@@ -645,7 +646,7 @@ def sync_mailbox(
     return processed, {
         "uidvalidity": uidvalidity,
         "last_uid": highest_seen_uid,
-        "backfill_incomplete": truncated,
+        "backfill_incomplete": truncated or (bool(all_uids) and highest_seen_uid < all_uids[-1]),
     }
 
 

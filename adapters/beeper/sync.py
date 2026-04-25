@@ -207,6 +207,43 @@ def chat_matches(chat, chat_filter, type_filter, network_filter, account_ids):
     return True
 
 
+def resolved_account(chat, chat_detail, accounts_by_id):
+    account_id = str(
+        pick(
+            chat_detail.get("account_id"),
+            chat_detail.get("account", {}).get("id"),
+            chat.get("account_id"),
+            chat.get("account", {}).get("id"),
+            "",
+        )
+    )
+    account = accounts_by_id.get(account_id, {}) if account_id else {}
+    return account_id, account
+
+
+def resolved_chat_matches(chat, chat_detail, account, account_filter, network_filter):
+    if account_filter:
+        account_values = {
+            str(pick(account.get("id"), "")).lower(),
+            str(pick(account.get("account_id"), "")).lower(),
+            str(pick(account.get("bridge_id"), "")).lower(),
+            str(pick(account.get("service_name"), account.get("network"), "")).lower(),
+        }
+        if not account_values.intersection(account_filter):
+            return False
+    if network_filter:
+        values = {
+            str(pick(chat_detail.get("network"), "")).lower(),
+            str(pick(chat_detail.get("service_name"), "")).lower(),
+            str(pick(account.get("network"), "")).lower(),
+            str(pick(account.get("service_name"), "")).lower(),
+            str(pick(account.get("bridge_id"), "")).lower(),
+        }
+        if not values.intersection(network_filter):
+            return False
+    return True
+
+
 def participant_record(raw, chat, account):
     pid = participant_external_id(raw)
     if not pid:
@@ -236,6 +273,19 @@ def reply_parent_external_id(chat_id, message):
         "",
     )
     return f"{chat_id}:{parent_raw}" if parent_raw else ""
+
+
+def reply_parent_raw_id(message):
+    return str(
+        pick(
+            message.get("linkedMessageID"),
+            message.get("linked_message_id"),
+            message.get("reply_to"),
+            message.get("parent_id"),
+            message.get("thread_parent_id"),
+            "",
+        )
+    )
 
 
 def fetch_messages(base_url, chat_id, token, timeout, state, message_limit):
@@ -281,6 +331,23 @@ def fetch_messages(base_url, chat_id, token, timeout, state, message_limit):
             break
 
     return messages, latest_cursor
+
+
+def update_message_lookup(state, messages, chat_id):
+    lookup = state.get("message_lookup")
+    if not isinstance(lookup, dict):
+        lookup = {}
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        raw_id = str(pick(message.get("id"), message.get("message_id"), message.get("guid"), message.get("event_id"), ""))
+        if not raw_id:
+            continue
+        lookup[raw_id] = message_external_id(chat_id, message)
+    rows = sorted(lookup.items(), key=lambda item: item[1])
+    if len(rows) > 5000:
+        rows = rows[-5000:]
+    return dict(rows)
 
 
 def main():
@@ -348,7 +415,7 @@ def main():
         sys.exit(2)
 
     selected_chats = []
-    account_ids = set(accounts_by_id.keys()) if account_filter else None
+    account_ids = set(accounts_by_id.keys()) if account_filter or network_filter else None
     for chat in chats:
         if not isinstance(chat, dict):
             continue
@@ -373,8 +440,9 @@ def main():
         except Exception as exc:
             log("warn", f"Failed to fetch chat {chat_id}: {exc}")
 
-        account_id = str(pick(chat_detail.get("account_id"), chat_detail.get("account", {}).get("id"), chat.get("account_id"), ""))
-        account = accounts_by_id.get(account_id, {}) if account_id else {}
+        account_id, account = resolved_account(chat, chat_detail, accounts_by_id)
+        if not resolved_chat_matches(chat, chat_detail, account, account_filter, network_filter):
+            continue
         last_activity = normalize_time(pick(chat_detail.get("last_activity_at"), chat_detail.get("updated_at"), chat_detail.get("timestamp"), chat_detail.get("last_message_ts")))
 
         emit({
@@ -425,6 +493,7 @@ def main():
                 "message_cursor": str(pick(state.get("message_cursor"), state.get("cursor"), "")).strip(),
             }
             continue
+        message_lookup = update_message_lookup(state, messages, chat_id)
 
         known_message_ids = set()
         latest_seen = watermark or last_activity
@@ -466,8 +535,9 @@ def main():
             text = normalize_text(pick(message.get("text"), message.get("body"), message.get("content"), ""))
             snippet = text[:500]
             attachments = pick(message.get("attachments"), message.get("files"), [])
+            parent_raw_id = reply_parent_raw_id(message)
             reply_to = reply_parent_external_id(chat_id, message)
-            parent_id = reply_to if reply_to and reply_to in known_message_ids else ""
+            parent_id = reply_to if reply_to and reply_to in known_message_ids else message_lookup.get(parent_raw_id, "")
             permalink = str(pick(message.get("permalink"), message.get("url"), ""))[:4000]
 
             emit({
@@ -499,6 +569,7 @@ def main():
             "watermark": latest_seen or last_activity or watermark,
             "last_chat_activity": last_activity,
             "message_cursor": latest_cursor,
+            "message_lookup": message_lookup,
         }
 
     emit({"cursor": json.dumps(new_state, ensure_ascii=False, sort_keys=True)})

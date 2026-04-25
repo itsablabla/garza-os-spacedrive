@@ -193,6 +193,23 @@ def synthetic_chat_id(row):
     return f"synthetic:{service}:{handle_id or row['row_id']}"
 
 
+def normalize_attachment_path(path, attachments_root):
+    path = normalize_text(path, 4000)
+    if not path:
+        return ""
+    if path.startswith("~/"):
+        path = os.path.expanduser(path)
+    default_root = os.path.expanduser("~/Library/Messages/Attachments")
+    configured_root = os.path.expanduser(attachments_root) if attachments_root else default_root
+    normalized_path = os.path.normpath(path)
+    attachment_marker = os.path.normpath("Library/Messages/Attachments")
+    marker_index = normalized_path.find(attachment_marker)
+    if marker_index >= 0:
+        relative = normalized_path[marker_index + len(attachment_marker):].lstrip(os.sep)
+        return configured_root if not relative else os.path.join(configured_root, relative)
+    return path
+
+
 def build_queries(conn):
     queries = {}
     msg_cols = columns_for(conn, "message")
@@ -364,6 +381,7 @@ def main():
     if not isinstance(cursor, dict):
         cursor = {}
     last_synced = parse_iso(cursor.get("last_timestamp"))
+    last_row_id = parse_int(cursor.get("last_row_id"), 0)
 
     temp_dir = None
     try:
@@ -418,15 +436,18 @@ def main():
                 continue
             if dt and last_synced and dt < last_synced:
                 continue
+            if dt and last_synced and dt == last_synced and row["row_id"] <= last_row_id:
+                continue
             filtered.append((dt or APPLE_EPOCH, row, ts))
-        filtered.sort(key=lambda item: item[0])
+        filtered.sort(key=lambda item: (item[0], item[1]["row_id"]))
         if max_messages > 0:
-            filtered = filtered[-max_messages:]
+            filtered = filtered[:max_messages]
 
         seen_participants = set()
         seen_chats = set()
         seen_messages = []
         latest_timestamp = cursor.get("last_timestamp") or ""
+        latest_row_id = last_row_id
 
         for _dt, row, ts in filtered:
             chat = chats.get(row["chat_id"])
@@ -549,13 +570,12 @@ def main():
             seen_messages.append(message_guid)
             if ts and ts > latest_timestamp:
                 latest_timestamp = ts
+                latest_row_id = row["row_id"]
+            elif ts and ts == latest_timestamp:
+                latest_row_id = max(latest_row_id, row["row_id"])
 
             for attachment in attachments:
-                path = attachment["path"]
-                if path and path.startswith("~/"):
-                    path = os.path.expanduser(path)
-                if path and attachments_root and path.startswith(os.path.expanduser("~/Library/Messages/Attachments")):
-                    path = path
+                path = normalize_attachment_path(attachment["path"], attachments_root)
                 emit({
                     "upsert": "attachment",
                     "external_id": attachment["external_id"],
@@ -575,6 +595,7 @@ def main():
             "version": 1,
             "synced_at": iso_now(),
             "last_timestamp": latest_timestamp,
+            "last_row_id": latest_row_id,
             "message_count": len(seen_messages),
         }
         emit({"cursor": json.dumps(next_cursor, ensure_ascii=False, sort_keys=True)})
