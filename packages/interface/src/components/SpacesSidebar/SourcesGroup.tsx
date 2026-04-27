@@ -38,15 +38,11 @@ export function SourcesGroup({
 				onToggle={onToggle}
 				sortableAttributes={sortableAttributes}
 				sortableListeners={sortableListeners}
-				rightComponent={
+				actionComponent={
 					<button
 						type="button"
-						onClick={(event) => {
-							event.preventDefault();
-							event.stopPropagation();
-							navigate('/sources/adapters');
-						}}
-						className="text-sidebar-ink-faint hover:bg-sidebar-selected/30 hover:text-sidebar-ink ml-auto rounded-md p-1 transition-colors"
+						onClick={() => navigate('/sources/adapters')}
+						className="text-sidebar-ink-faint hover:bg-sidebar-selected/30 hover:text-sidebar-ink rounded-md p-1 transition-colors"
 						aria-label="Add source"
 						title="Add source"
 					>
